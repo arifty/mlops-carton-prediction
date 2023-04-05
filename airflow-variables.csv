@@ -1,0 +1,6 @@
+${AIRFLOW_VARIABLE_PREFIX}${projectName2}_start_date,
+${AIRFLOW_VARIABLE_PREFIX}${projectName2}_end_date,
+${AIRFLOW_VARIABLE_PREFIX}${projectName2}_snowflake_scaled_warehouse_size,XLARGE
+${AIRFLOW_VARIABLE_PREFIX}${projectName2}_image,${DOCKER_IMAGE}:${IMAGE_TAG}
+knnights_snowflake_original_warehouse_size,MEDIUM
+${projectName2}_schedule,@daily

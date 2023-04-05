@@ -1,0 +1,47 @@
+site_name: Shapeshifter
+site_url: https://nike-sca-emea.github.io/shapeshifter
+site_description: Converting units into cartons and more!
+
+theme:
+  name: material
+  palette:
+    primary: red
+    accent: pink
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+
+repo_url: https://github.com/nike-sca-emea/shapeshifter
+repo_name: nike-sca-emea/shapeshifter
+site_author: kNNights
+extra:
+  social:
+    - icon: material/github
+      link: Shapeshifter
+
+nav:
+  - About: index.md
+  - Install: install.md
+  - Guide: guide.md
+  - Development: development.md
+  - API Reference: reference/
+
+plugins:
+  - search
+  - autorefs
+  - include-markdown
+  - gen-files:
+      scripts:
+        - docs/gen_ref_nav.py
+  - literate-nav:
+      nav_file: API.md
+  - section-index
+  - mkdocstrings
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
+  - pymdownx.tabbed:
+      alternate_style: true

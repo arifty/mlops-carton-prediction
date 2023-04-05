@@ -1,0 +1,10 @@
+qualityConfig:
+  phases:
+    build:
+      - testSonar:
+          metricSource: sonar
+          sonarHost: https://knnights.sonar.bmx.nikecloud.com
+          sonarProject: shapeshifter
+  application:
+    name: shapeshifter
+   

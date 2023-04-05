@@ -1,0 +1,15 @@
+version: "3"
+
+services:
+
+  python:
+    build: .
+    command: python
+    tty: True
+
+  docs:
+    build: .
+    command: scripts/docs/serve.sh
+    restart: unless-stopped
+    ports:
+      - "8000:8000"

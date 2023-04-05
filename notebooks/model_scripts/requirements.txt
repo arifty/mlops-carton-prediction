@@ -1,0 +1,7 @@
+/opt/ml/model/code/lib/graphviz/graphviz-0.17-py3-none-any.whl
+/opt/ml/model/code/lib/joblib/joblib-1.2.0-py3-none-any.whl
+/opt/ml/model/code/lib/lightgbm/lightgbm-3.2.1-py3-none-manylinux1_x86_64.whl
+/opt/ml/model/code/lib/plotly/plotly-5.1.0-py2.py3-none-any.whl
+/opt/ml/model/code/lib/scikit_learn/scikit_learn-1.0.1-cp38-cp38-manylinux_2_12_x86_64.manylinux2010_x86_64.whl
+/opt/ml/model/code/lib/tenacity/tenacity-8.0.1-py3-none-any.whl
+/opt/ml/model/code/lib/threadpoolctl/threadpoolctl-2.2.0-py3-none-any.whl

@@ -1,0 +1,327 @@
+/* groovylint-disable DuplicateMapLiteral, DuplicateStringLiteral, LineLength, NestedBlockDepth */
+//Jenkins Pipeline
+@Library(['cop-pipeline-bootstrap', 'emea-cicd-step', 'cop-pipeline-step']) _
+loadPipelines()
+
+def config = [
+        qma: [
+                configFile           : 'quality-config.yaml',
+                releaseBranchMatchers: ['master', 'main'],
+                candidateInfo        : 'build/candidate-info.json',
+        ]
+]
+
+def TEST_DEPLOYABLE_BRANCH_FORMAT = "(main|master|PR-).*"
+def PROD_DEPLOYABLE_BRANCH_FORMAT = "^v\\d+\\.\\d+\\.\\d+\$"
+// disable the below flag to enable scheduling in non-test env
+def NO_SCHEDULE_NON_PROD = 'true'
+def ecr_policy
+
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'env', defaultValue: 'qa', description: 'please enter qa or prod')
+    }
+
+    environment {
+        ENVIRON = "${env.BRANCH_NAME.matches(TEST_DEPLOYABLE_BRANCH_FORMAT) ? 'test' : env.BRANCH_NAME.matches(PROD_DEPLOYABLE_BRANCH_FORMAT) ? params.env : 'NA'}"
+        AWS_ACCOUNT_NUMBER = "${ENVIRON == 'test' ? '188961369755' : '451746848004'}"
+        AWS_ENVIRON = "${ENVIRON == 'test' ? 'test' : 'prod'}"
+        AWS_REGION = 'eu-west-1'
+        K8S_NAMESPACE = "${ENVIRON == 'test' ? 'development' : ENVIRON}"
+        projectName1 = "${env.JOB_NAME.tokenize('/')[1]}"
+        projectName2 = "${projectName1.replaceAll('-', '_')}"
+        DOCKER_IMAGE = "${AWS_ACCOUNT_NUMBER}.dkr.ecr.${AWS_REGION}.amazonaws.com/knnights/${projectName1}"
+        IMAGE_TAG = "${env.BRANCH_NAME}-${env.GIT_COMMIT}"
+        SCHEDULER = "map-knnights-${ENVIRON}"
+        CICD_ROLE = "arn:aws:iam::${AWS_ACCOUNT_NUMBER}:role/cet-commercial-emea0-euwest1-knnightscicdrole"
+        DEPLOYABLE_FLAG = "${ENVIRON == 'NA' ? false : true}" 
+        GITHUB_API_CREDS = credentials('GITHUB_API_NEW')
+        GIT_SSH_COMMAND = 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+        KNNIGHTS_OKTA_CREDS = credentials('metapipes')
+        AIRFLOW_VARIABLE_PREFIX = "${env.BRANCH_NAME.startsWith('PR-') ? env.BRANCH_NAME + '-' : ''}"
+        SCHEDULE_DAGS = "${ENVIRON == 'prod' && NO_SCHEDULE_NON_PROD == 'true' ? 'true' : 'false' }"
+        // PR name extracted from master merge commit message
+
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('workspace setup') {
+            steps {
+                script {
+                    qma([action: 'create'] + (config.qma ?: [:]))
+                    qma([action: 'submit', phase: 'build'] + config.qma)
+                    qma([action: 'status', status: 'PENDING'] + (config.qma ?: [:]))
+                    committeremail = sh(script: 'git --no-pager show -s --format=\'%ae\'', returnStdout: true).trim()
+                    withCerberus([sdbPath: 'app/knnights-sdb/nike_id', sdbKeys: ['id' : 'CLIENT_ID','client_secret':'CLIENT_SECRET']]) 
+                    {
+                        CLIENT_ID = sh(returnStdout: true, script: "echo $CLIENT_ID").trim()
+                        CLIENT_SECRET = sh(returnStdout: true, script: "echo \'${CLIENT_SECRET}\'").trim()
+                    }
+                    withCerberus.downloadSecretsFile([
+                        sdbPath: 'app/knnights-sdb/map/ecr-policy.json',
+                        file: 'ecr-policy.json'
+                    ])
+                    ecr_policy = readJSON file:'ecr-policy.json'
+                    ciskiptests = sh (script: "git log -1 | grep '\\[ci skiptest\\]'", returnStatus: true)
+                    env.PR_NO = sh (
+                        script: """
+                            GIT_COMMIT_MESSAGE=\$(git log -1 --pretty=format:'%s')
+                            if \$(echo "\$GIT_COMMIT_MESSAGE"|grep -q 'Merge pull request')
+                            then
+                                echo "\$GIT_COMMIT_MESSAGE"|awk -F' ' '{print "PR-"substr(\$4,2)}'
+                            else
+                                echo "NO_PR"
+                            fi
+                        """,
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+
+        stage('Testing') {
+            steps {
+                echo 'QMA: Report start of deployment'
+                qma([action: 'status', status: 'PENDING'] + (config.qma ?: [:]))
+                script {
+                    if (ciskiptests == 0) {
+                        echo "skipping the stage..."
+                    }
+                    else {
+                        env.sourcebranch = "${env.CHANGE_BRANCH}"
+                        sh '''
+                        echo "---------------Starting Testing stage----------------------------- "
+                        '''
+                        verificationPipelineStages([
+                                sonar : [
+                                        enabled         : true,
+                                        sonarQubeEnv    : 'knnights',
+                                        projectKey      : "${projectName1}",
+                                        sonarScannerTool: 'knnights-sonar',
+                                        failQualityGate : true, // optional
+                                ],
+                                pyspark: [
+                                        enabled    : true,
+                                        srcFolders : [ "${projectName2}" ],
+                                        testFolders: [ "tests" ],
+                                        requirements: 'black==20.8b1 click<8 pylint==2.16.1 pylint_json2html mypy poetry==1.1.15 pytest pytest-cov pytest-mock coverage nose2 nose2[coverage_plugin] pytest-html lxml pylint_junit py4j',
+                                        env: [ "AM_I_IN_A_DOCKER_CONTAINER=Yes" ], 
+                                ],
+                                qma   : [
+                                        configFile: 'quality-config.yaml', // Optional
+                                ]
+                        ])
+                    }
+                }
+            }
+            post {
+                success {
+                    echo 'QMA: Report successful deployment'
+                    qma([action: 'status', status: 'DEPLOYED'] + (config.qma ?: [:]))
+                }
+                failure {
+                    echo 'QMA: Report failed deployment'
+                    qma([action: 'status', status: 'FAILED'] + (config.qma ?: [:]))
+                // sh 'docker compose logs || true'
+                }
+            // cleanup {
+            //     sh 'docker compose down || true'
+            // }
+            }
+        }
+
+        stage('Label_setup') {
+            steps {
+                script {
+                    if (env.BRANCH_NAME.startsWith('PR')) {
+                        if (env.CHANGE_BRANCH.startsWith('feature')){
+                            pullRequest.addLabel('minor')
+                        }
+                        if (env.CHANGE_BRANCH.startsWith('bug')){
+                            pullRequest.addLabel('patch')
+                        }
+                        if (env.CHANGE_BRANCH.startsWith('major')){
+                            pullRequest.addLabel('major')
+                        }
+                    }
+                    if ( env.DEPLOYABLE_FLAG.toBoolean() ){
+                        sh '''
+                            echo "---------------Finished Stage Testing ----------------------------- "
+                        '''
+                        def gitCommitSHA = sh(returnStdout: true, script: 'git rev-parse  HEAD').trim()
+                        def json = sh(
+                            script: "curl -u ${GITHUB_API_CREDS} https://api.github.com/search/issues?q=${gitCommitSHA}",
+                            returnStdout: true
+                        )
+                        def prInfo = readJSON(text: json)
+                        labels = prInfo.items.labels.name
+                        echo "${labels}"
+                        version = sh(returnStdout: true, script: 'echo ').trim()
+                        for (commit in labels) {
+                            if (commit.contains('bug')) {
+                                echo 'bug '
+                                version = sh(returnStdout: true, script: 'echo patch').trim()
+                            }
+
+                            if (commit.contains('patch')) {
+                                echo 'patch '
+                                version = sh(returnStdout: true, script: 'echo patch').trim()
+                            }
+
+                            if (commit.contains('minor')) {
+                                echo 'minor '
+                                version = sh(returnStdout: true, script: 'echo minor').trim()
+                            }
+
+                            if (commit.contains('major')) {
+                                echo 'major'
+                                version = sh(returnStdout: true, script: 'echo major').trim()
+                            }
+                            echo "${version}"
+                        }
+                    }
+                    else {
+                        echo 'skipping the labeling...'
+                    }
+                }
+            }
+        }
+
+        stage('Build and Deploy application') {
+            agent {
+                docker {
+                    image 'artifactory.nike.com:9001/eda-emea/jenkins:v0.0.6'
+                    args '-v /var/run/docker.sock:/var/run/docker.sock -u root'
+                    reuseNode true
+                }
+            }
+            when {
+                expression { env.DEPLOYABLE_FLAG.toBoolean() }
+            }
+            stages {
+                stage ('Build and push to ECR') {
+                    when {
+                        expression { params.env != 'prod' }
+                    }
+                    steps {
+                        script {
+                            withAWS([role  : "${CICD_ROLE}", region: 'eu-west-1']) {
+                                sh './deploy-utils.sh build_and_deploy_to_ecr'
+                            }
+                        }
+                    }
+                }
+                stage('Rename dags, pipeline definitions and variables for PR deployment') {
+                    when {
+                        expression { env.BRANCH_NAME.startsWith('PR-') }
+                    }
+                    steps {
+                        script {
+                            sh './deploy-utils.sh rename_dags_and_variables'
+                        }
+                    }
+                }
+                stage('Deploy pipeline definitions to Sagemaker') {
+                    // when {
+                    //     changeset 'shapeshifter/*/sm_pipeline.py'
+                    // }
+                    steps {
+                        script {
+                            withAWS([role:  "${CICD_ROLE}", region: 'eu-west-1']) {
+                                sh './deploy-utils.sh deploy_sagemaker_pipeline'
+                            }
+                        }
+                    }
+                }
+                stage('Sync airflow dags') {
+                    steps {
+                        script {
+                            // Login using reading credentials(client_id and secret) from Cerberus.
+                            sh "CLIENT_ID=${CLIENT_ID} CLIENT_SECRET=${CLIENT_SECRET} ./deploy-utils.sh deploy_dags"
+                        }
+                    }
+                }
+                stage('Cleanup PR components') {
+                    when {
+                        allOf {
+                            expression { env.BRANCH_NAME.matches('main|master') }
+                            expression { env.PR_NO.startsWith('PR-') }
+                        }
+                    }
+                    steps {
+                        script {
+                            def json = sh(
+                                script: "curl --request POST https://nike.okta.com/oauth2/aus27z7p76as9Dz0H1t7/v1/token -u ${KNNIGHTS_OKTA_CREDS} --data 'grant_type=client_credentials'",
+                                returnStdout: true
+                            )
+                            def info = readJSON(text: json)
+                            access_token = info.access_token
+                            sh "CLIENT_ID=${CLIENT_ID} CLIENT_SECRET=${CLIENT_SECRET} access_token=${access_token} ./deploy-utils.sh cleanup_dags_and_variables"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy new package to airflow') {
+            when {
+                expression { env.DEPLOYABLE_FLAG.toBoolean() }
+            }
+            steps {
+                script {
+                    script {
+                        def json = sh(
+                            script: "curl --request POST https://nike.okta.com/oauth2/aus27z7p76as9Dz0H1t7/v1/token -u ${KNNIGHTS_OKTA_CREDS} --data 'grant_type=client_credentials'",
+                            returnStdout: true
+                        )
+                        def info = readJSON(text: json)
+                        access_token = info.access_token
+                        sh "access_token=${access_token} ./deploy-utils.sh deploy_airflow_variables"
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            cleanWs()
+            sh 'rm -r $HOME/.aws || true'
+        }
+        success {
+            script {
+                if (env.BRANCH_NAME.startsWith('v')) {
+                    slackSend teamDomain: 'nikedigital', color: 'good', channel: 'knnights-log-channel', token: 'mlS2Uga2jAzLqZYxksb5fJ2x', message: "${projectName1} - Image build is successfull for ${env.BRANCH_NAME} and commiter was ${env.committeremail}"
+                }
+                if (env.BRANCH_NAME.startsWith('PR')) {
+                    // CHANGE_ID is set only for pull requests, so it is safe to access the pullRequest global variable
+                    if (env.CHANGE_ID) {
+                        pullRequest.addLabel('Build Passing')
+                        pullRequest.comment('Build has passed and pullRequest can be Reviewed')
+                        pullRequest.review('APPROVE')
+                    }
+                }
+            }
+        }
+        failure {
+            script {
+                if (env.BRANCH_NAME.startsWith('PR')) {
+                    // CHANGE_ID is set only for pull requests, so it is safe to access the pullRequest global variable
+                    if (env.CHANGE_ID) {
+                        pullRequest.review('REQUEST_CHANGES', 'Change is the essential process of all existence.Build is failing')
+                        pullRequest.addLabel('Build Failed')
+                        pullRequest.comment('Build has failed, check the test result in Jenkins')
+                    }
+                }
+            }
+            slackSend teamDomain: 'niketechnology', color: '#ff0000', channel: 'knnights-log-channel', message: "${projectName1} - Image build is failing for ${env.BRANCH_NAME} and  commiter was ${env.committeremail}"
+        }
+    }
+}
